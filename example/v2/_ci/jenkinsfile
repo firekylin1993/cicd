@@ -1,0 +1,135 @@
+pipeline {
+    agent any
+    environment {
+        isAutoTrigger = sh (returnStdout: true, script: 'if [[ "$gitlabBranch" = "" ]]; then echo FALSE; else echo TRUE; fi').trim()
+        cur_branch = sh (returnStdout: true, script: 'if [[ "$gitlabBranch" = "" ]]; then echo $input_branch; else echo $gitlabBranch; fi').trim()
+    }
+    options {
+        skipDefaultCheckout true
+        gitLabConnection('code')
+    }
+    post {
+        unsuccessful {
+            updateGitlabCommitStatus name: 'jenkins', state: 'failed'
+        }
+        success {
+            updateGitlabCommitStatus name: 'jenkins', state: 'success'
+        }
+    }
+    stages {
+        stage ('获取分支'){
+            steps {
+                updateGitlabCommitStatus name: 'jenkins', state: 'pending'
+                echo "----调试信息----"
+                // echo "构建触发人员：${gitlabUserName}"
+                // echo "构建触发人员邮箱：${gitlabUserEmail}"
+                // echo "当前分支：${cur_branch}"
+                // echo "目标分支：${gitlabTargetBranch}"
+                // echo "获取分支：${cur_branch}"
+                checkout([$class: 'GitSCM', branches: [[name: "${cur_branch}"]], doGenerateSubmoduleConfigurations: false, userRemoteConfigs: [[credentialsId: '68c9a6a1-9bd3-4cc7-bc24-f9d17142da8d', url: "${git_repo}"]]])
+                sh "env"
+                echo "----调试信息----"
+            }
+        }
+        stage ('获取脚本'){
+            steps {
+                sh "wget https://code.avlyun.org/devops/cicd/raw/master/fabfilev2.py -O _ci/fabfile.py"
+            }
+        }
+        stage ('质量扫描'){
+            when {
+                // 当属于合并请求触发时，允许质量扫描
+                allOf {
+                    environment ignoreCase: true, name: 'gitlabActionType', value: 'MERGE'
+                    environment ignoreCase: true, name: 'gitlabMergeRequestState', value: 'opened'
+                }
+            }
+            steps {
+                /* golang 安装依赖 */
+                sh returnStatus: true, script: "docker run --rm -v `pwd`:/app -w /app -e GOPROXY=https://registry-mirrors.avlyun.org/repository/goproxy/,direct -e GOPRIVATE=*.avlyun.org -e GONOSUMDB=*.avlyun.org -e GONOPROXY=*.avlyun.org golang:1.14 go mod vendor"
+                /* golang 代码质量扫描 */
+                sh returnStatus: true, script: "docker run --rm -v `pwd`:/app -w /app golangci/golangci-lint:latest golangci-lint run --out-format=checkstyle --issues-exit-code=0 > report.xml"
+                /* golang 代码测试覆盖率扫描 */
+                sh "docker run --rm -v `pwd`:/app -w /app golang:1.14 go test -mod=vendor -timeout=60s -coverprofile='coverage.out' ./..."
+                /* sonarqube 扫描 */
+                sh "fab -f _ci/fabfile localsonarscanner"
+            }
+        }
+        stage ('单测'){
+            steps {
+                sh "echo ojbk"
+            }
+        }
+        stage ('构建'){
+            options {
+                // 失败时允许再重试一次
+                retry(1)
+            }
+            when {
+                // 当不属于合并请求触发时，允许构建
+                not {
+                    allOf {
+                        environment ignoreCase: true, name: 'gitlabActionType', value: 'MERGE'
+                        environment ignoreCase: true, name: 'gitlabMergeRequestState', value: 'opened'
+                    }
+                }
+            }
+            steps {
+                echo "----调试信息----"
+                sh "pwd"
+                sh "ls -l"
+                echo "----调试信息----"
+                sh "fab -f _ci/fabfile build"
+            }
+        }
+        stage ('存档YAML'){
+            when {
+                // 当部署方式为 K8S 时，并且不属于合并请求触发时，允许存档yaml
+                allOf {
+                    environment ignoreCase: true, name: 'is_k8s', value: 'true'
+                    not {
+                        allOf {
+                            environment ignoreCase: true, name: 'gitlabActionType', value: 'MERGE'
+                            environment ignoreCase: true, name: 'gitlabMergeRequestState', value: 'opened'
+                        }
+                    }
+                }
+            }
+            steps {
+                archiveArtifacts 'deploy.yaml'
+            }
+        }
+        stage ('部署'){
+            when {
+                // 当部署方式为 K8S ，并且不属于合并请求触发时：
+                //     当触发方式为自动触发，并且触发分支不是TAG标签时，允许部署
+                //     当触发方式为手动触发，并且k8s_auto_deploy选项为true时，允许部署
+                //     其他均不允许部署
+                allOf {
+                    environment ignoreCase: true, name: 'is_k8s', value: 'true'
+                    not {
+                        allOf {
+                            environment ignoreCase: true, name: 'gitlabActionType', value: 'MERGE'
+                            environment ignoreCase: true, name: 'gitlabMergeRequestState', value: 'opened'
+                        }
+                    }
+                    anyOf {
+                        allOf {
+                            environment ignoreCase: true, name: 'isAutoTrigger', value: 'false'
+                            environment ignoreCase: true, name: 'k8s_auto_deploy', value: 'true'
+                        }
+                        allOf {
+                            environment ignoreCase: true, name: 'isAutoTrigger', value: 'true'
+                            not {
+                                environment ignoreCase: true, name: 'gitlabActionType', value: 'TAG_PUSH'
+                            }
+                        }
+                    }
+                }
+            }
+            steps {
+                sh "fab -f _ci/fabfile deploy"
+            }
+        }
+	}
+}

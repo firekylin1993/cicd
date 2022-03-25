@@ -1,0 +1,4 @@
+include:
+  - project: "devops/cicd"
+    ref: "master"
+    file: "/gitlab-ci/golang/.gitlab-ci.yml"

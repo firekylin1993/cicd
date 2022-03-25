@@ -1,0 +1,76 @@
+.runner_tags: &runner_tags # 匹配执行任务的 runner 容器
+  tags:
+    - nuc-k3s
+
+# 上面是模板部分
+# -----------------------------------
+# 下面是正文部分
+
+# 不手动指定 image 的 job，默认使用的镜像
+image: docker:stable
+# 使用 dind 的话，不能漏掉下面这几行
+services:
+  - docker:stable-dind
+variables:
+  DOCKER_TLS_CERTDIR: ""
+  DOCKER_DRIVER: overlay2
+  DOCKER_HOST: tcp://docker:2375
+
+stages:
+
+  # 构建镜像并推送 harbor
+  - build
+  # 准备发布使用的 yaml 文件
+  - pre_deploy
+  # 发布到 k8s 集群中
+  - deploy
+
+build: # 构建镜像
+  stage: build
+  image: docker:stable
+  script:
+    # 将 builder 镜像拉下来，用作多阶段构建中第一阶段的缓存使用
+    - docker pull $HARBOR:builder || true
+    # 进行第一阶段构建，产出 builder 镜像，用作下一次的缓存
+    - docker build --target builder --cache-from $HARBOR:builder -t $HARBOR:builder -f _ci/Dockerfile .
+    # 将 latest 镜像拉下来，用作第二阶段的构建的缓存，根据 Dockerfile 实际情况判断是否需要这一步优化
+    - docker pull $HARBOR:latest || true
+    # 开始实际的构建
+    - docker build --cache-from $HARBOR:builder --cache-from $HARBOR:latest -f _ci/Dockerfile -t $HARBOR:$CI_COMMIT_SHORT_SHA .
+    - docker push $HARBOR:$CI_COMMIT_SHORT_SHA
+    # 上传这一次生成的 builder 镜像
+    - docker push $HARBOR:builder
+  only:
+    - master
+  <<: *runner_tags
+
+pre_deploy: # 在网页上手动触发 pipeline 执行时触发
+  stage: pre_deploy
+  image: dibi/envsubst
+  variables:
+    CONTAINER_IMAGE: $HARBOR:$CI_COMMIT_SHORT_SHA
+    replace_project_name: $CI_PROJECT_NAME
+    replace_deploy_time: $CI_JOB_STARTED_AT
+    replace_tag: $CI_COMMIT_TAG
+    replace_harbor: $HARBOR
+  script:
+    - envsubst < _ci/template.yaml > deploy.yaml
+  artifacts:
+    paths:
+      - deploy.yaml
+  only:
+    - master
+  <<: *runner_tags
+
+deploy:
+  stage: deploy
+  image: bitnami/kubectl:1.21
+  script:
+    - kubectl apply --kubeconfig $KUBE_CONFIG -f deploy.yaml --namespace $K8S_NAMESPACE
+  only:
+    - master
+  <<: *runner_tags
+
+
+
+

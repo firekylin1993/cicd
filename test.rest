@@ -1,0 +1,11 @@
+###
+GET https://code.avlyun.org/api/v4/projects/2/approvals
+PRIVATE-TOKEN: 1FSMtzD2JSygww36GPzR
+
+###
+POST https://code.avlyun.org/api/v4/projects/2/merge_requests/5/approve
+PRIVATE-TOKEN: 1FSMtzD2JSygww36GPzR
+
+###
+GET https://code.avlyun.org/api/v4/projects/2/merge_requests
+PRIVATE-TOKEN: 1FSMtzD2JSygww36GPzR

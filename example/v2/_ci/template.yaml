@@ -1,0 +1,96 @@
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  labels:
+    app: $replace_project_name
+    deploy_time: "$replace_deploy_time"
+    version: $replace_tag
+  name: $replace_project_name
+spec:
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: $replace_project_name
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: $replace_project_name
+        version: $replace_tag
+        deploy_time: "$replace_deploy_time"
+    spec:
+      containers:
+      - name: $replace_project_name
+        env: [$replace_env]
+        image: $replace_harbor:$replace_tag
+        imagePullPolicy: Always
+        ports:
+        - name: 8080tcp
+          containerPort: 8080
+          protocol: TCP
+        livenessProbe:
+          failureThreshold: 3
+          initialDelaySeconds: 10
+          periodSeconds: 2
+          successThreshold: 1
+          tcpSocket:
+            port: 8080
+          timeoutSeconds: 2
+        readinessProbe:
+          failureThreshold: 3
+          initialDelaySeconds: 10
+          periodSeconds: 2
+          successThreshold: 2
+          tcpSocket:
+            port: 8080
+          timeoutSeconds: 2
+        resources:
+          limits:
+            cpu: 20m
+            memory: 200Mi
+          requests:
+            cpu: 20m
+            memory: 200Mi
+        volumeMounts:
+        - mountPath: /etc/localtime
+          name: host-time
+          readOnly: true
+      restartPolicy: Always
+      volumes:
+      - name: host-time
+        hostPath:
+          path: /etc/localtime
+          type: ""
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: $replace_project_name
+spec:
+  ports:
+  - name: 8080tcp
+    port: 80
+    protocol: TCP
+    targetPort: 8080
+  selector:
+    app: $replace_project_name
+  sessionAffinity: None
+  type: ClusterIP
+---
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: $replace_project_name
+spec:
+  rules:
+  - host: $replace_project_name.t.k8ss.cc
+    http:
+      paths:
+      - backend:
+          serviceName: $replace_project_name
+          servicePort: 80

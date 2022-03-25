@@ -1,0 +1,35 @@
+# 依赖的环境变量
+
+# SONAR_TOKEN 继承全局
+# SONAR_HOST_URL 继承全局
+# CI_PRIVATE_TOKEN 继承全局
+# K8S_NAMESPACE 项目定制化
+# HARBOR 项目定制化
+
+before_script:
+  - mkdir _ci/
+  - wget https://code.avlyun.org/devops/cicd/-/raw/master/fabfilev3.py -O _ci/fabfilev3.py
+
+stages:
+  - gitcheck
+  - prereport
+
+sonarqube:
+  stage: prereport
+  tags:
+    - j
+  script:
+    - docker run --rm -v "$CI_PROJECT_DIR:/usr/src" sonarsource/sonar-scanner-cli:latest sonar-scanner -Dsonar.host.url=$SONAR_HOST_URL -Dsonar.login=$SONAR_TOKEN -Dsonar.projectVersion=$CI_COMMIT_REF_NAME -Dsonar.projectKey=$CI_PROJECT_NAME -Dsonar.projectName="$CI_PROJECT_TITLE" -Dsonar.qualitygate.wait=true 2>&1 | tee .sonar.tmp || echo "quality gate failed"
+    - /usr/bin/python3 _ci/fabfilev3.py sonar_report
+  only:
+    - merge_requests
+
+# 检查代码是否从 master 拉出来的，不然不予合并，检查失败发送通知
+forkMaster:
+  stage: gitcheck
+  tags:
+    - j
+  script:
+    - /usr/bin/python3 _ci/fabfilev3.py is_branch_base_master
+  only:
+    - merge_requests

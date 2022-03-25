@@ -1,0 +1,156 @@
+# 依赖的环境变量
+
+# SONAR_TOKEN 继承全局
+# SONAR_HOST_URL 继承全局
+# CI_PRIVATE_TOKEN 继承全局
+# K8S_NAMESPACE 项目定制化
+# HARBOR 项目定制化
+.runner_tags: &runner_tags # 匹配执行任务的 runner 容器
+  tags:
+    - ${RUNNER_TAG}
+
+before_script:
+  - wget https://code.avlyun.org/devops/cicd/-/raw/master/fabfilev3.py -O _ci/fabfilev3.py
+
+stages:
+  - gitcheck
+  - prescan
+  - prereport
+  - ci-build
+  - tag-build
+  - pre_deploy
+  - deploy
+
+compile_by_web:
+  stage: ci-build
+  only:
+    - web
+  image: harbor.avlyun.org/public/docker-buildx:20.10.7
+  script:
+    - docker buildx ls
+    - docker login -u ${HARBOR_USER} -p ${HARBOR_PWD} harbor.avlyun.org
+    - docker buildx create --use
+    - docker buildx build --push --platform ${BUILDX_PLATFORM} --build-arg VERSION_TAG=$CI_COMMIT_TAG --build-arg COMMIT_ID=$CI_COMMIT_SHORT_SHA -f _ci/Dockerfile -t $HARBOR:$CI_COMMIT_SHORT_SHA .
+  <<: *runner_tags
+
+compile_by_tag:
+  stage: tag-build
+  only:
+    - tags
+  image: harbor.avlyun.org/public/docker-buildx:20.10.7
+  script:
+    - docker buildx ls
+    - docker login -u ${HARBOR_USER} -p ${HARBOR_PWD} harbor.avlyun.org
+    - docker buildx create --use
+    - docker buildx build --push --platform ${BUILDX_PLATFORM} --build-arg VERSION_TAG=$CI_COMMIT_TAG --build-arg COMMIT_ID=$CI_COMMIT_SHORT_SHA -f _ci/Dockerfile -t $HARBOR:$CI_COMMIT_TAG .
+  <<: *runner_tags
+
+pre_deploy_by_tag: # 通过打 tag 触发时，镜像版本使用 tag
+  stage: pre_deploy
+  image: harbor.avlyun.org/public/dibi/envsubst:latest
+  variables:
+    # deploy_tag 和 deploy_web 其实就只有这一行和 only 不同
+    CONTAINER_IMAGE: $HARBOR:$CI_COMMIT_TAG
+  script:
+    - envsubst '$CONTAINER_IMAGE $CI_COMMIT_TAG $CI_PROJECT_NAME $CI_COMMIT_SHORT_SHA' < _ci/template.yaml > deploy.yaml
+  artifacts:
+    paths:
+      - deploy.yaml
+  only:
+    - tags
+  <<: *runner_tags
+
+pre_deploy_by_web: # 在网页上手动触发 pipeline 执行时触发
+  stage: pre_deploy
+  image: harbor.avlyun.org/public/dibi/envsubst:latest
+  variables:
+    CONTAINER_IMAGE: $HARBOR:$CI_COMMIT_SHORT_SHA
+  script:
+    - envsubst '$CONTAINER_IMAGE $CI_COMMIT_TAG $CI_PROJECT_NAME $CI_COMMIT_SHORT_SHA' < _ci/template.yaml > deploy.yaml
+  artifacts:
+    paths:
+      - deploy.yaml
+  only:
+    - web
+  <<: *runner_tags
+
+deploy:
+  stage: deploy
+  image: harbor.avlyun.org/public/bitnami/kubectl:1.22.3
+  script:
+    - kubectl apply --kubeconfig $KUBE_CONFIG -f deploy.yaml --namespace $K8S_NAMESPACE
+  only:
+    - web
+    - tags
+  <<: *runner_tags
+
+unit-test:
+  stage: prescan
+  tags:
+    - j
+  script:
+    - sh _ci/unittest.sh
+  artifacts:
+    reports:
+      cobertura:
+        - _ci/coverage.xml
+      junit:
+        - _ci/ut_report.xml
+    paths:
+      - _ci/coverage.out
+    expire_in: 1 day
+  only:
+    - merge_requests
+    - web
+
+unit-test-fail:
+  stage: prereport
+  image: harbor.avlyun.org/public/python-request:3.10
+  dependencies:
+    - unit-test
+  when: on_failure
+  script:
+    - /usr/bin/python3 _ci/fabfilev3.py unittest_failure_report
+  only:
+    - merge_requests
+  <<: *runner_tags
+
+code-lint:
+  stage: prescan
+  image: harbor.avlyun.org/public/golangci/golangci-lint:v1.44
+  script:
+    - golangci-lint run --out-format=checkstyle --issues-exit-code=0 > _ci/report.xml
+  artifacts:
+    paths:
+      - _ci/report.xml
+    expire_in: 1 day
+  only:
+    - merge_requests
+    - web
+  <<: *runner_tags
+
+
+sonarqube:
+  stage: prereport
+  image: harbor.avlyun.org/public/sonarsource/sonar-scanner-cli:latest
+  dependencies:
+    - code-lint
+    - unit-test
+  script:
+    - sonar-scanner -Dsonar.host.url=$SONAR_HOST_URL -Dsonar.login=$SONAR_TOKEN -Dsonar.projectVersion=$CI_COMMIT_REF_NAME -Dsonar.projectKey=$CI_PROJECT_NAME -Dsonar.projectName="$CI_PROJECT_TITLE" -Dsonar.qualitygate.wait=true 2>&1 | tee .sonar.tmp || echo "quality gate failed"
+    - /usr/bin/python3 _ci/fabfilev3.py sonar_report
+  only:
+    - merge_requests
+  <<: *runner_tags
+
+
+# 检查代码是否从 master 拉出来的，不然不予合并，检查失败发送通知
+forkMaster:
+  stage: gitcheck
+  image: harbor.avlyun.org/public/python-request:3.10
+  script:
+    - /usr/bin/python3 _ci/fabfilev3.py is_branch_base_master
+    - /usr/bin/python3 _ci/fabfilev3.py assign_suggest_to_approver
+  only:
+    - merge_requests
+  <<: *runner_tags

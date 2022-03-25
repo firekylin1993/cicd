@@ -1,0 +1,145 @@
+.runner_tags: &runner_tags # 匹配执行任务的 runner 容器
+  tags:
+    - nuc-k3s
+
+# 上面是模板部分
+# -----------------------------------
+# 下面是正文部分
+before_script:
+  - wget https://code.avlyun.org/devops/cicd/-/raw/master/fabfilev3.py -O _ci/fabfilev3.py
+
+# 不手动指定 image 的 job，默认使用的镜像
+image: docker:stable
+# 使用 dind 的话，不能漏掉下面这几行
+services:
+- docker:stable-dind
+variables:
+  DOCKER_TLS_CERTDIR: ""
+  DOCKER_DRIVER: overlay2
+  DOCKER_HOST: tcp://docker:2375
+
+stages:
+  # 检查 git 相关问题，例如分支是否基于最新 master。（后续还可以加入针对 git 提交内容是否符合规范进行检查）
+  - gitcheck
+  # 进行 sonarqube 扫描
+  - sonar
+  # 通过企业微信上报扫描结果
+  - report
+  # 进行单测、golint、eslint 等测试 
+  - lint 
+
+  # -------- gitcheck、sonar、report、lint 阶段在提交 merge_request 时触发检查，供管理员判断是否允许 mr 通过，其中 lint 阶段还会在手动执行 pipeline 时也会触发，确保上线代码无 bug。
+  
+  # 构建镜像并推送 harbor
+  - build
+  # 如果存在 git tag，给镜像打标签并推送 harbor 
+  - tag
+  # 准备发布使用的 yaml 文件
+  - pre_deploy
+  # 发布到 k8s 集群中
+  - deploy
+
+  # -------- build、tag、deploy 三个阶段，打 tag、手动执行 pipeline 等时候都会执行
+
+branchCheck: # 检查分支是否基于最新的 master
+  stage: gitcheck
+  image: python:3
+  script:
+    - pip install requests -i https://mirrors.aliyun.com/pypi/simple/
+    - python _ci/fabfilev3.py is_branch_base_master
+    - python _ci/fabfilev3.py assign_suggest_to_approver
+  only:
+    # 只在 merge_request 被提交时触发一下。
+    - merge_requests
+  <<: *runner_tags
+
+sonar: # 进行 sonar 质量扫描
+  stage: sonar
+  image: sonarsource/sonar-scanner-cli:4
+  script:
+    - sonar-scanner -Dsonar.host.url=$SONAR_HOST_URL -Dsonar.login=$SONAR_TOKEN -Dsonar.projectVersion=$CI_COMMIT_REF_NAME -Dsonar.projectKey=$CI_PROJECT_NAME -Dsonar.projectName="$CI_PROJECT_TITLE" -Dsonar.qualitygate.wait=true 2>&1 | tee .sonar.tmp || echo "quality gate failed"
+  artifacts:
+    paths: 
+      - .sonar.tmp
+    expire_in: 1 hour
+  only:
+    - merge_requests
+  <<: *runner_tags
+
+sonar-report: # 将 sonar 扫描的结果进行上报
+  stage: report
+  image: python:3
+  script:
+    - pip install requests -i https://mirrors.aliyun.com/pypi/simple/
+    - python _ci/fabfilev3.py sonar_report
+  only:
+    - merge_requests
+  <<: *runner_tags
+
+# 前端项目暂时没强制要求 eslint 通过，先不写 lint 阶段
+
+build: # 构建镜像
+  stage: build
+  image: docker:stable
+  script:
+    # 开始实际的构建
+    - docker build --build-arg VERSION_TAG=$CI_COMMIT_TAG --build-arg COMMIT_ID=$CI_COMMIT_SHORT_SHA --cache-from $HARBOR:builder --cache-from $HARBOR:latest -f _ci/Dockerfile -t $HARBOR:$CI_COMMIT_SHORT_SHA .
+    - docker push $HARBOR:$CI_COMMIT_SHORT_SHA
+  only:
+    - tags
+    - web
+  <<: *runner_tags
+
+tag: # 通过打 tag 触发 pipeline 时，给镜像也打上 tag
+  stage: tag
+  image: docker:stable
+  script:
+    - docker pull $HARBOR:$CI_COMMIT_SHORT_SHA
+    - docker tag $HARBOR:$CI_COMMIT_SHORT_SHA $HARBOR:$CI_COMMIT_TAG
+    # 在 打 tag 时，触发 latest 镜像更新
+    - docker tag $HARBOR:$CI_COMMIT_SHORT_SHA $HARBOR:latest
+    - docker push $HARBOR:$CI_COMMIT_TAG
+    - docker push $HARBOR:latest
+  only:
+    - tags
+  <<: *runner_tags
+
+pre_deploy_by_tag: # 通过打 tag 触发时，镜像版本使用 tag
+  stage: pre_deploy
+  image: dibi/envsubst
+  variables:
+    # deploy_tag 和 deploy_web 其实就只有这一行和 only 不同
+    CONTAINER_IMAGE: $HARBOR:$CI_COMMIT_TAG
+  script:
+    - envsubst '$CONTAINER_IMAGE $CI_COMMIT_TAG $CI_PROJECT_NAME $CI_COMMIT_SHORT_SHA' < _ci/template.yaml > deploy.yaml
+  artifacts:
+    paths:
+      - deploy.yaml
+  only:
+    - tags
+  <<: *runner_tags
+
+pre_deploy_by_web: # 在网页上手动触发 pipeline 执行时触发
+  stage: pre_deploy
+  image: dibi/envsubst
+  variables:
+    CONTAINER_IMAGE: $HARBOR:$CI_COMMIT_SHORT_SHA
+  script:
+    - envsubst '$CONTAINER_IMAGE $CI_COMMIT_TAG $CI_PROJECT_NAME $CI_COMMIT_SHORT_SHA' < _ci/template.yaml > deploy.yaml
+  artifacts:
+    paths:
+      - deploy.yaml
+  only:
+    - web
+  <<: *runner_tags
+
+deploy:
+  stage: deploy
+  image: bitnami/kubectl:1.21
+  script:
+    - kubectl apply --kubeconfig $KUBE_CONFIG -f deploy.yaml --namespace $K8S_NAMESPACE
+  only:
+    - web
+    - tags
+  <<: *runner_tags
+

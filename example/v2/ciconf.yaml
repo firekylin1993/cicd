@@ -1,0 +1,15 @@
+# 项目名称，只允许小写英文、数字以及"-"，且只能以英文开头
+projectName: auth-be
+# 项目GIT地址
+gitRepo: git@code.avlyun.org:devops/project-x/auth.git
+# 项目所在git仓库组名及项目名
+gitPath: devops/project-x/auth
+# 项目镜像名称
+harbor: harbor.inf.avlyun.org/c-base/project-x-auth
+# 要部署到的K8S集群名（测试、预发布环境），该参数需要和运维联系确定
+# 当前可用集群有两个：
+# wuhan-huashan-vm  武汉-花山集群
+# wuhan-mye-pm      武汉-迈异集群
+deployCluster: wuhan-huashan-vm
+# 要部署到的K8S集群命名空间（测试、预发布环境），该参数需要和运维联系获取
+deployNamespace: projectx-test
